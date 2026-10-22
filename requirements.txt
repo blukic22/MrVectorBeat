@@ -1,0 +1,25 @@
+streamlit==1.63.0
+streamlit-keyup==1.0.0
+pandas==3.0.5
+pyarrow==25.0.1
+numpy==2.5.3
+nltk==3.10.3
+requests==2.34.2
+beautifulsoup4==4.15.0
+tqdm==4.70.0
+matplotlib==3.11.1
+networkx==3.6.1
+sentence-transformers==6.0.1
+transformers==5.17.0
+torch==2.6.0
+faiss-cpu==1.15.0
+
+# Verzije su zakljucane (==) da bi svi radili sa istim bibliotekama
+# tokom celog semestra - nove verzije ponekad menjaju ponasanje.
+#
+# torch odavde je obicna CPU verzija. Ako racunar ima NVIDIA karticu,
+# torch se moze rucno reinstalirati u CUDA verziji (videti README) za
+# brze SBERT enkodiranje i obuku Transformera. U svom kodu birajte
+# uredjaj sa
+#   device = "cuda" if torch.cuda.is_available() else "cpu"
+# pa isti kod radi i sa i bez kartice.
