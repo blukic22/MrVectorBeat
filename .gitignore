@@ -5,3 +5,4 @@ __pycache__/
 .streamlit/credentials.toml
 artifacts/
 venv/
+CLAUDE.md
