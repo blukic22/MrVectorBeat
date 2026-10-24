@@ -20,6 +20,7 @@ from mrvectorbeat import pipeline, prikaz, tekst, autodopuna
 from st_keyup import st_keyup
 import math
 import time
+import html
 
 # OVDE IDU importi vasih modula, npr.:
 #   from mrvectorbeat import tekst, upit, indeks, tfidf, bm25, ...
@@ -45,7 +46,9 @@ def ucitaj_trie():
     return pipeline.ucitaj_trie()
 
 
-@st.cache_data
+# cache_resource: isti objekat pri svakom renderu, bez kopije kataloga sa
+# stihovima; strane ga samo citaju, nijedna ga ne menja
+@st.cache_resource
 def ucitaj_katalog():
     return pipeline.ucitaj_katalog()
 
@@ -57,7 +60,7 @@ def ucitaj_izvodjace():
 
 @st.cache_data
 def broj_reci():
-    pass
+    return len(ucitaj_indeks())
 
 
 @st.cache_resource
@@ -169,7 +172,7 @@ def ucitaj_audio_vektore():
 def ucitaj_sbert_vektore():
     pass
 
-if not all(p.exists() for p in (pipeline.KATALOG, pipeline.TRIE, pipeline.KGRAM)):
+if not all(p.exists() for p in (pipeline.KATALOG, pipeline.TRIE, pipeline.KGRAM, pipeline.INDEKS)):
     st.error("Nema artefakata. Pokrenite u terminalu: python -m scripts.pripremi")
     st.stop()
 
@@ -196,10 +199,8 @@ with st.sidebar:
 
     st.divider()
     st.caption("Ucitani indeksi")
-    # OVDE IDE statistika preko prikaz.statistika(labela, broj):
-    #   prikaz.statistika("Pesama", len(df))
-    #   prikaz.statistika("Izvodjaca", len(izvodjaci))
-    #   prikaz.statistika("Reci u indeksu", broj_reci())
+    prikaz.statistika("Pesama", len(df))
+    prikaz.statistika("Reci u indeksu", broj_reci())
 
 
 # --- Pretraga ----------------------------------------------------------
@@ -275,8 +276,117 @@ elif strana == "Katalog":
 elif strana == "Stihovi":
     st.title("Pretraga po stihovima")
     st.caption("Pretrazuje sadrzaj pesama, ne naslove.")
+    st.caption("Pozicije su mesta u listi svih reci stiha; stop-reci se ne indeksiraju, "
+               "ali zauzimaju mesto.")
 
-    # Koristi: ind, ucitaj_tfidf(), porodice, df, prikaz.kartica()
+    PRAZAN = "Upit nema termina posle obrade: stop-reci se ne pretrazuju."
+    SIRINA = 8          # reci levo i desno od pogotka u isecku
+
+    def isecak(stih, pogoci):
+        """Isecak oko prvog pogotka; pogoci je lista lista pozicija (jedan pogodak
+        = pozicije koje se isticu). Pozicije su iste kao u indeksu jer su obe
+        iz izdvajanje_reci nad istim stihom."""
+        reci = tekst.izdvajanje_reci(stih)
+        if not pogoci:
+            od, do, istaknute = 0, 2 * SIRINA + 1, []
+        else:
+            od, do = max(0, min(pogoci[0]) - SIRINA), max(pogoci[0]) + SIRINA + 1
+            istaknute = [p for pog in pogoci for p in pog]
+        istaknute = set(istaknute)       # samo za prikaz, nije postings lista
+        delovi = []
+        for i in range(od, min(do, len(reci))):
+            rec = html.escape(reci[i])   # prvo escape, pa tek onda <mark>
+            delovi.append(f"<mark>{rec}</mark>" if i in istaknute else rec)
+        tekst_isecka = ("… " if od > 0 else "") + " ".join(delovi) + (" …" if do < len(reci) else "")
+        if len(pogoci) > 1:
+            tekst_isecka += f" <span style='color:#8b8b98'>(još {len(pogoci) - 1} pogodaka)</span>"
+        return tekst_isecka
+
+    rezim = st.radio("Režim", ["Bulov", "Frazni", "Blizina"], horizontal=True)
+    poruka, pogodci, pozitivni = None, [], ""
+    # pogodci: lista (id pesme, pogoci ili None); None znaci da se pozicije traze
+    # tek za prikazane pesme (Bulov rezim)
+    t0 = time.perf_counter()
+    if rezim == "Bulov":
+        op = st.radio("Operator", ["I", "ILI", "NE"], horizontal=True)
+        if op == "NE":
+            c1, c2 = st.columns(2)
+            pozitivni = c1.text_input("Mora da sadrži", placeholder="npr. love")
+            zabranjeni = c2.text_input("Ne sme da sadrži", placeholder="npr. hate cry")
+            kljuc = (rezim, op, pozitivni, zabranjeni)
+            uneto = pozitivni.strip() or zabranjeni.strip()
+            if uneto and not tekst.termini(pozitivni) and not tekst.termini(zabranjeni):
+                poruka = PRAZAN
+            elif uneto:
+                pogodci = [(d, None) for d in ind.bulov("NE", pozitivni, zabranjeni)]
+        else:
+            pozitivni = st.text_input("Termini", placeholder="npr. love heart")
+            kljuc = (rezim, op, pozitivni)
+            uneto = pozitivni.strip()
+            if uneto and not tekst.termini(pozitivni):
+                poruka = PRAZAN
+            elif uneto:
+                pogodci = [(d, None) for d in ind.bulov(op, pozitivni)]
+    elif rezim == "Frazni":
+        fraza = st.text_input("Fraza", placeholder="npr. the love of my life")
+        kljuc = (rezim, fraza)
+        uneto = fraza.strip()
+        if uneto and not tekst.termini(fraza):
+            poruka = PRAZAN
+        elif uneto:
+            pogodci = [(d, [list(range(p, p + duzina)) for p in pocetci])
+                       for d, pocetci, duzina in ind.frazni(fraza)]
+    else:
+        c1, c2, c3 = st.columns([2, 2, 1])
+        rec1 = c1.text_input("Prva reč", placeholder="npr. love")
+        rec2 = c2.text_input("Druga reč", placeholder="npr. heart")
+        k = c3.number_input("k (rastojanje < k)", 2, 50, 5)
+        kljuc = (rezim, rec1, rec2, k)
+        uneto = rec1.strip() and rec2.strip()
+        n1, n2 = len(tekst.termini(rec1)), len(tekst.termini(rec2))
+        if uneto and (n1 == 0 or n2 == 0):
+            poruka = PRAZAN
+        elif uneto and (n1 > 1 or n2 > 1):
+            poruka = "Svako polje mora da se svede na tačno jedan termin."
+        elif uneto:
+            pogodci = [(d, [list(par) for par in parovi]) for d, parovi in ind.blizina(rec1, rec2, k)]
+    ms = (time.perf_counter() - t0) * 1000
+
+    if poruka:
+        st.warning(poruka)
+    elif uneto and not pogodci:
+        st.info("Nema pesama koje odgovaraju upitu.")
+    elif pogodci:
+        # Redosled po popularnosti, pri izjednacenju po id-ju. Ovo NIJE rangiranje
+        # (TF-IDF i BM25 su naredne nedelje): sortira se samo konacna lista
+        # pogodaka, postings liste se nikad ne sortiraju.
+        popularnost = df["track_popularity"].to_numpy()
+        pogodci = sorted(pogodci, key=lambda x: (-popularnost[x[0]], x[0]))
+
+        po_strani = 10
+        broj_strana = max(1, math.ceil(len(pogodci) / po_strani))
+        if st.session_state.get("stih_kljuc") != kljuc:    # novi upit kreće od prve strane
+            st.session_state["stih_kljuc"] = kljuc
+            st.session_state["stih_strana"] = 1
+        st.session_state["stih_strana"] = min(max(st.session_state.get("stih_strana", 1), 1), broj_strana)
+        tekuca = st.number_input("Strana", 1, broj_strana, key="stih_strana")
+        st.markdown(f"**Pogodaka: {len(pogodci):,}** · strana **{tekuca}** od **{broj_strana}** · {ms:.1f} ms")
+
+        deo = pogodci[(tekuca - 1) * po_strani: tekuca * po_strani]
+        if rezim == "Bulov":
+            # pozicije pozitivnih termina samo za prikazane pesme
+            prikazane = sorted(d for d, _ in deo)
+            po_terminu = [ind._pozicije_u(t, prikazane) for t in tekst.termini(pozitivni)]
+            pozicije = {d: sorted(p for lista in po_terminu for p in lista[i])
+                        for i, d in enumerate(prikazane)}
+            deo = [(d, [[p] for p in pozicije[d]]) for d, _ in deo]
+
+        for i, (d, pogoci) in enumerate(deo):
+            red = df.iloc[d].to_dict()
+            red["godina"] = "—" if pd.isna(red["godina"]) else int(red["godina"])
+            prikaz.kartica((tekuca - 1) * po_strani + i + 1, red)
+            st.markdown(f"<div style='margin:-4px 0 14px 8px'>{isecak(red['lyrics'], pogoci)}</div>",
+                        unsafe_allow_html=True)
 
 
 # --- Jezicki model -----------------------------------------------------

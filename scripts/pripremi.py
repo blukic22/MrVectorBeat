@@ -30,7 +30,7 @@ pipeline.napravi_trie()
 print("K-gramski indeks:")
 pipeline.napravi_kgram()
 
-# Invertovani indeks
+print("Pozicioni invertovani indeks:")
 pipeline.napravi_indeks()
 
 # TF-IDF model

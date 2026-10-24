@@ -1,3 +1,9 @@
+# Pozicije (Nedelja 3, odluka B): pozicija termina je njegovo mesto u listi
+# SVIH reci stiha (izdvajanje_reci), pre uklanjanja stop-reci. Stop-reci se
+# ne indeksiraju, ali zauzimaju mesto: u "love you baby" je love na 0, babi
+# na 2. Zato fraza i blizina mere rastojanje u stvarnim recima stiha, a
+# isecak se pravi direktno iz izdvajanje_reci nad originalnim stihom.
+
 import re
 
 import nltk
@@ -64,3 +70,10 @@ def obradi(tekst : str, stemer : Stemer = stemer) -> dict :
 
 def termini(tekst : str, stemer : Stemer = stemer) -> list[str] :
     return obradi(tekst, stemer)["koreni"]
+
+def termini_sa_pozicijama(tekst : str, stemer : Stemer = stemer) -> tuple[list[str], list[int]] :
+    """Isti termini kao termini(), plus pozicija svakog termina u listi svih reci.
+    koreni[i] potice od reci r["reci"][pozicije[i]]."""
+    r = obradi(tekst, stemer)
+    pozicije = [i for i, w in enumerate(r["reci"]) if w not in stop_reci]
+    return r["koreni"], pozicije

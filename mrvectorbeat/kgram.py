@@ -1,3 +1,5 @@
+from mrvectorbeat.skupovi import presek
+
 K = 3
 
 
@@ -19,22 +21,6 @@ def kgrami_obrasca(obrazac : str, k : int = K) -> set :
             d = d + "$"
         grami |= {d[j:j + k] for j in range(len(d) - k + 1)}
     return grami
-
-
-def presek(a : list, b : list) -> list :
-    """Presek dve rastuce sortirane liste, prolazom sa dva pokazivaca."""
-    i = j = 0
-    rez = []
-    while i < len(a) and j < len(b) :
-        if a[i] == b[j] :
-            rez.append(a[i])
-            i += 1
-            j += 1
-        elif a[i] < b[j] :
-            i += 1
-        else :
-            j += 1
-    return rez
 
 
 def odgovara(kljuc : str, obrazac : str) -> bool :

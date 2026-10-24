@@ -19,19 +19,23 @@
 #   from mrvectorbeat import tekst, trie, indeks, ...
 
 import gzip, pickle
+from array import array
 from collections import Counter
 import pandas as pd
 from pathlib import Path
 from mrvectorbeat import tekst, katalog
 from mrvectorbeat.trie import Trie
 from mrvectorbeat.kgram import KgramIndeks, K
+from mrvectorbeat.indeks import Indeks
 
 CSV = Path("data/spotify_songs.csv")
 ART = Path("artifacts")
 KATALOG = ART / "katalog.parquet"
 TOKENI = ART / "tokeni.pkl.gz"
+POZICIJE = ART / "pozicije.pkl.gz"
 TRIE = ART / "trie.pkl.gz"
 KGRAM = ART / "kgram.pkl.gz"
+INDEKS = ART / "indeks.pkl.gz"
 
 # Kolone koje zadrzavamo u katalogu. Sve ostalo iz CSV-a nam ne treba.
 # Kartice u prikaz.py ocekuju bar: track_name, track_artist, godina,
@@ -80,22 +84,37 @@ def ucitaj_katalog():
 
 
 def napravi_tokene():
+    """Snima dva artefakta iz jednog prolaza: tokeni (track_id -> lista termina,
+    format iz Nedelje 1) i pozicije (track_id -> array('I'), pozicija svakog
+    termina u listi svih reci stiha, paralelno sa tokenima)."""
     df = ucitaj_katalog()
     stemer = tekst.Stemer()
-    tokeni, ukupno = {}, 0
+    tokeni, pozicije, ukupno = {}, {}, 0
     for tid, stih in zip(df["track_id"], df["lyrics"]):
-        tokeni[tid] = tekst.termini(stih, stemer)
-        ukupno += len(tokeni[tid])
+        koreni, poz = tekst.termini_sa_pozicijama(stih, stemer)
+        assert len(poz) == len(koreni)
+        tokeni[tid] = koreni
+        pozicije[tid] = array("I", poz)
+        ukupno += len(koreni)
     assert stemer.poziva_stemer == len(stemer.kes)
     with gzip.open(TOKENI, "wb") as f:
         pickle.dump(tokeni, f, protocol=pickle.HIGHEST_PROTOCOL)
+    with gzip.open(POZICIJE, "wb") as f:
+        pickle.dump(pozicije, f, protocol=pickle.HIGHEST_PROTOCOL)
     print(f"  tokena: {ukupno}, razlicitih oblika: {len(stemer.kes)}, "
           f"poziva stemera: {stemer.poziva_stemer}")
+    print(f"  pozicija: {sum(len(p) for p in pozicije.values())}")
     return tokeni
 
 
 def ucitaj_tokene():
     with gzip.open(TOKENI, "rb") as f:
+        return pickle.load(f)
+
+
+def ucitaj_pozicije():
+    """Vraca recnik track_id -> array('I') pozicija, paralelno sa tokenima."""
+    with gzip.open(POZICIJE, "rb") as f:
         return pickle.load(f)
 
 
@@ -162,13 +181,22 @@ def ucitaj_kgram():
 
 
 def napravi_indeks():
-    """Gradi invertovani indeks iz tokena i snima ga u artifacts/."""
-    pass
+    """Gradi pozicioni invertovani indeks iz tokena i pozicija i snima ga u
+    artifacts/. Id pesme = redni broj reda u katalogu."""
+    df = ucitaj_katalog()
+    tokeni, pozicije = ucitaj_tokene(), ucitaj_pozicije()
+    ids = list(df["track_id"])
+    ind = Indeks([tokeni[t] for t in ids], [pozicije[t] for t in ids], ids)
+    with gzip.open(INDEKS, "wb") as f:
+        pickle.dump(ind, f, protocol=pickle.HIGHEST_PROTOCOL)
+    print(f"  termina: {len(ind)}, postings unosa: {ind.broj_postings()}, "
+          f"pozicija: {ind.broj_pozicija()}, fajl: {INDEKS.stat().st_size / 2**20:.1f} MB")
+    return ind
 
 
 def ucitaj_indeks():
-    """Cita gotov indeks iz artifacts/."""
-    pass
+    with gzip.open(INDEKS, "rb") as f:
+        return pickle.load(f)
 
 
 def napravi_tfidf():
