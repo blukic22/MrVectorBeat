@@ -16,7 +16,7 @@
 
 import streamlit as st
 import pandas as pd
-from mrvectorbeat import pipeline, prikaz, tekst, autodopuna
+from mrvectorbeat import pipeline, prikaz, tekst, autodopuna, rangirano
 from st_keyup import st_keyup
 import math
 import time
@@ -172,7 +172,7 @@ def ucitaj_audio_vektore():
 def ucitaj_sbert_vektore():
     pass
 
-if not all(p.exists() for p in (pipeline.KATALOG, pipeline.TRIE, pipeline.KGRAM, pipeline.INDEKS)):
+if not all(p.exists() for p in (pipeline.KATALOG, pipeline.TRIE, pipeline.KGRAM, pipeline.INDEKS, pipeline.TFIDF)):
     st.error("Nema artefakata. Pokrenite u terminalu: python -m scripts.pripremi")
     st.stop()
 
@@ -302,8 +302,11 @@ elif strana == "Stihovi":
             tekst_isecka += f" <span style='color:#8b8b98'>(još {len(pogoci) - 1} pogodaka)</span>"
         return tekst_isecka
 
-    rezim = st.radio("Režim", ["Bulov", "Frazni", "Blizina"], horizontal=True)
+    rezim = st.radio("Režim", ["Bulov", "Frazni", "Blizina", "Rangirano"], horizontal=True)
     poruka, pogodci, pozitivni = None, [], ""
+    if rezim == "Rangirano" :
+        rangirano.strana(ind, ucitaj_tfidf(), df)
+        st.stop()
     # pogodci: lista (id pesme, pogoci ili None); None znaci da se pozicije traze
     # tek za prikazane pesme (Bulov rezim)
     t0 = time.perf_counter()

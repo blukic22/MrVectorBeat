@@ -34,6 +34,7 @@ print("Pozicioni invertovani indeks:")
 pipeline.napravi_indeks()
 
 # TF-IDF model
+print("TF-IDF model:")
 pipeline.napravi_tfidf()
 
 # BM25 i evaluacija

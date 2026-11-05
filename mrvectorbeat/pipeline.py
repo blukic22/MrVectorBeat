@@ -27,6 +27,8 @@ from mrvectorbeat import tekst, katalog
 from mrvectorbeat.trie import Trie
 from mrvectorbeat.kgram import KgramIndeks, K
 from mrvectorbeat.indeks import Indeks
+from mrvectorbeat.tfidf import TfidfModel
+import time
 
 CSV = Path("data/spotify_songs.csv")
 ART = Path("artifacts")
@@ -36,6 +38,7 @@ POZICIJE = ART / "pozicije.pkl.gz"
 TRIE = ART / "trie.pkl.gz"
 KGRAM = ART / "kgram.pkl.gz"
 INDEKS = ART / "indeks.pkl.gz"
+TFIDF = ART / "tfidf.pkl.gz"
 
 # Kolone koje zadrzavamo u katalogu. Sve ostalo iz CSV-a nam ne treba.
 # Kartice u prikaz.py ocekuju bar: track_name, track_artist, godina,
@@ -200,13 +203,20 @@ def ucitaj_indeks():
 
 
 def napravi_tfidf():
-    """Gradi TF-IDF model i snima ga u artifacts/."""
-    pass
+    """Gradi TF-IDF model iz pozicionog indeksa (tf = odmak[i+1] - odmak[i]) i snima ga u artifacts/."""
+    t0 = time.perf_counter()
+    ind = ucitaj_indeks()
+    model = TfidfModel(ind)
+    with gzip.open(TFIDF, "wb") as f:
+        pickle.dump(model, f, protocol=pickle.HIGHEST_PROTOCOL)
+    print(f"  termina: {len(model.idf)}, tezina uz postings: {model.broj_tezina()}, "
+          f"fajl: {TFIDF.stat().st_size / 2**20:.1f} MB, gradnja: {time.perf_counter() - t0:.1f} s")
+    return model
 
 
 def ucitaj_tfidf():
-    """Cita gotov TF-IDF model iz artifacts/."""
-    pass
+    with gzip.open(TFIDF, "rb") as f:
+        return pickle.load(f)
 
 
 def napravi_bm25():
