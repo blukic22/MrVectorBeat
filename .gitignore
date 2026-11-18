@@ -8,3 +8,4 @@ venv/
 CLAUDE.md
 *.md
 !README.md
+cache/

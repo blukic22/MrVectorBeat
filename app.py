@@ -16,7 +16,7 @@
 
 import streamlit as st
 import pandas as pd
-from mrvectorbeat import pipeline, prikaz, tekst, autodopuna, rangirano, evaluacija
+from mrvectorbeat import pipeline, prikaz, tekst, autodopuna, rangirano, evaluacija, jezicki, plejlista
 from st_keyup import st_keyup
 import math
 import time
@@ -53,9 +53,9 @@ def ucitaj_katalog():
     return pipeline.ucitaj_katalog()
 
 
-@st.cache_data
+@st.cache_resource   # PageRank i slicnost; None dok crawler i pripremi ne naprave graf
 def ucitaj_izvodjace():
-    pass
+    return pipeline.ucitaj_rangove() if pipeline.RANGOVI.exists() else None
 
 
 @st.cache_data
@@ -99,7 +99,7 @@ def mere_evaluacije():
     return pd.DataFrame(redovi), ocene
 
 
-@st.cache_data
+@st.cache_resource
 def ucitaj_graf():
     return pipeline.ucitaj_graf()
 
@@ -170,8 +170,8 @@ def ucitaj_katalog_po_id():
 
 
 @st.cache_resource
-def ucitaj_jezicki(mu):
-    pass
+def ucitaj_jezicki():
+    return pipeline.ucitaj_jezicki()
 
 
 @st.cache_data
@@ -412,10 +412,121 @@ elif strana == "Stihovi":
 
 elif strana == "Jezicki model":
     st.title("Jezicki model i prosirenje upita")
-    st.caption("Treci nacin rangiranja, i sta se sve moze dodati upitu.")
+    if not pipeline.JEZICKI.exists():
+        st.error("Nema jezičkog modela. Pokrenite: python -m scripts.pripremi")
+        st.stop()
+    jm = ucitaj_jezicki()
+    tfidf_model = ucitaj_tfidf()
+    porodice_kat = df["porodica"].to_numpy()
+    PRIKAZANO = 10
+    oznake = st.session_state.setdefault("jm_oznake", {})     # pesma -> 1 (dopada) / -1 (ne dopada)
 
-    # Koristi: ucitaj_jezicki(mu), ucitaj_bm25(), ucitaj_tokene_po_pesmi(),
-    #          ucitaj_qrels(), ind, df, prikaz.kartica()
+    # --- Koja je ovo pesma? ---
+    st.subheader("Koja je ovo pesma?")
+    st.caption(f"Jezički model sa Dirichlet ublažavanjem (μ = {jm.mu:g}): pesme su poređane po "
+               "log P(upit | pesma). Pesma kojoj fale neke reči ostaje u rezultatu, samo niže. "
+               "Ako najboljoj pesmi fale reči, one se proširuju WordNet sinonimima manje težine.")
+    upit = st.text_input("Deo stiha kojeg se sećate", placeholder="npr. found love in a place without hope",
+                         key="jm_upit")
+    rezultat, prikazane = [], []
+    if upit.strip():
+        t0 = time.perf_counter()
+        r = jezicki.pretraga(ind, jm, upit, porodice_kat)
+        ms = (time.perf_counter() - t0) * 1000
+        rezultat = r["rezultat"]
+        if not r["reci"]:
+            st.warning("Upit nema reči posle obrade: stop-reči se ne pretražuju.")
+        elif not rezultat:
+            st.info("Nijedna pesma ne sadrži nijednu reč upita.")
+        else:
+            if r["prosireno"]:
+                st.info("Uključeni su i rezultati za: " + ", ".join(s for s, _, _ in r["dodate"]))
+            st.markdown(f"**Pesama u rezultatu: {len(rezultat):,}** · ocenjeno **{r['ocenjeno']:,}** od "
+                        f"{len(df):,} (samo one sa bar jednom reči) · {ms:.1f} ms")
+            deo = rezultat[:PRIKAZANO]
+            prikazane = [d for d, _ in deo]
+            otkucane = list(dict.fromkeys(k for _, k in r["reci"]))
+            oblik = {}
+            for rec, k in r["reci"]:
+                oblik.setdefault(k, rec)
+            for s, k, _ in r["dodate"]:
+                oblik[k] = s
+            pokriva = jezicki.pokrivenost(ind, otkucane + [k for _, k, _ in r["dodate"]], sorted(prikazane))
+            for i, (d, ocena) in enumerate(deo, 1):
+                prikaz.kartica(i, df.iloc[d].to_dict() | {"godina": "—" if pd.isna(df["godina"].iat[d])
+                                                              else int(df["godina"].iat[d])}, ocena)
+                ima = [oblik[k] for k in otkucane if pokriva[d][k]]
+                fali = [oblik[k] for k in otkucane if not pokriva[d][k]]
+                sin = [s for s, k, _ in r["dodate"] if pokriva[d][k]]
+                opis = "Sadrži: " + (", ".join(ima) or "—")
+                if fali:
+                    opis += " · **Nedostaje: " + ", ".join(fali) + "**"
+                if sin:
+                    opis += " · sinonimi: " + ", ".join(sin)
+                c0, c1, c2 = st.columns([4, 1.3, 1.5])
+                c0.markdown(html.escape(opis))
+                o = oznake.get(d, 0)
+                if c1.button(("✓ " if o == 1 else "") + "Dopada mi se", key=f"jm_da_{d}"):
+                    if o == 1:
+                        oznake.pop(d)                     # drugi klik uklanja oznaku
+                    else:
+                        oznake[d] = 1
+                    st.rerun()
+                if c2.button(("✓ " if o == -1 else "") + "Ne dopada mi se", key=f"jm_ne_{d}"):
+                    if o == -1:
+                        oznake.pop(d)
+                    else:
+                        oznake[d] = -1
+                    st.rerun()
+
+    # --- Plejlista po mom ukusu ---
+    st.divider()
+    st.subheader("Plejlista po mom ukusu")
+    dopada = sorted(d for d, o in oznake.items() if o == 1)
+    ne_dopada = sorted(d for d, o in oznake.items() if o == -1)
+    st.caption(f"Označeno: {len(dopada)} dopada se, {len(ne_dopada)} ne dopada se. Rocchio: "
+               f"{plejlista.BETA} · prosek pesama koje se dopadaju − {plejlista.GAMA} · prosek onih koje "
+               "se ne dopadaju (ltc vektori teksta).")
+    c1, c2 = st.columns([1, 1])
+    if c1.button("Napravi plejlistu", type="primary"):
+        st.session_state["jm_plejlista"] = True
+    if oznake and c2.button("Ukloni sve oznake"):
+        oznake.clear()
+        st.rerun()
+    if st.session_state.get("jm_plejlista"):
+        # racuna se iz TRENUTNIH oznaka pri svakom prikazu, pa promena oznake menja plejlistu
+        if not dopada and not ne_dopada:
+            dopada = sorted(prikazane[:plejlista.PODRAZUMEVANO])
+            if dopada:
+                st.caption(f"Nema oznaka: pretpostavlja se da vam se dopadaju prva "
+                           f"{len(dopada)} rezultata pretrage.")
+        if not dopada:
+            st.info("Označite bar jednu pesmu koja vam se dopada (ili pretražite nešto).")
+        else:
+            p = plejlista.napravi(ind, tfidf_model, dopada, ne_dopada, prikazane, porodice_kat)
+            if not p["plejlista"]:
+                st.info("Nema dovoljno sličnih pesama za plejlistu.")
+            else:
+                oblici = plejlista.oblici(df, dopada, [t for t, _ in p["reci"]])
+                st.markdown("**Napravljena na osnovu reči:** " + ", ".join(
+                    html.escape(oblici[t]) for t, _ in p["reci"]))
+                for i, (d, ocena) in enumerate(p["plejlista"], 1):
+                    prikaz.kartica(i, df.iloc[d].to_dict() | {"godina": "—" if pd.isna(df["godina"].iat[d])
+                                                                  else int(df["godina"].iat[d])}, ocena)
+
+    # --- izbor mu ---
+    with st.expander("Izbor parametra μ"):
+        st.caption("MRR nad upitima za jednu pesmu iz qrels (bez proširenja), za više vrednosti μ; "
+                   "računa scripts.pripremi.")
+        mreza_mu = pd.DataFrame(jm.mreza, columns=["μ", "grupa", "MRR"]).pivot(
+            index="μ", columns="grupa", values="MRR")
+        st.line_chart(mreza_mu, x_label="μ", y_label="MRR")
+        st.dataframe(pd.DataFrame({g: {"bez proširenja": a, "sa proširenjem": b}
+                                   for g, (a, b) in jm.prosirenje.items()}).T.style.format("{:.3f}"))
+        st.markdown(f"Izabrano μ = **{jm.mu:g}**. Za vrlo malo μ MRR je malo veći, ali tada skoro "
+                    "samo broj pogođenih reči odlučuje i refren koji se ponavlja ne pomaže: "
+                    "„found love in a place without hope” daje Rihannu tek na 7. mestu za μ = 5, "
+                    "a na 1. od μ = 100.")
 
 
 # --- Evaluacija --------------------------------------------------------
@@ -502,8 +613,90 @@ elif strana == "Izvodjaci":
     st.title("Uticaj izvodjaca")
     st.caption("Ko je najuticajniji izvodjac - PageRank nad grafom koji je "
                "napravio crawler, naspram prostog brojanja linkova.")
+    if izvodjaci is None:
+        st.error("Nema grafa i rangova. Pokrenite: python -u -m scripts.crawl, pa python -m scripts.pripremi")
+        st.stop()
+    graf = ucitaj_graf()
+    naslovi = graf["naslovi"]
+    ime = lambda a: graf["izvodjac"][a][0]           # ime iz kataloga
+    s = izvodjaci["statistika"]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Stranica u grafu", f"{s['stranica']:,}")
+    c2.metric("Muzičkih", f"{100 * s['muzickih'] / max(1, s['stranica']):.1f}%")
+    c3.metric("Linkova (grana)", f"{s['grana']:,}")
+    c4.metric("Izvođača iz kataloga", f"{len(izvodjaci['poredak']):,}")
 
-    # Koristi: ucitaj_graf(), prikaz.kartica_izvodjaca()
+    tab1, tab2 = st.tabs(["Najuticajniji izvođači", "Slični izvođači"])
+
+    # --- najuticajniji ---
+    with tab1:
+        st.caption(f"PageRank nad celim grafom (d = {izvodjaci['d']}, {izvodjaci['iteracija']} iteracija); "
+                   "prikazani su samo izvođači iz kataloga. Uticaj zavisi i od toga koliko su važne "
+                   "stranice koje pokazuju na izvođača, a ne samo od njihovog broja.")
+        poredak = izvodjaci["poredak"]
+        broj = st.select_slider("Koliko izvođača", [10, 20, 50, 100], value=20, key="izv_broj")
+        trazi = st.text_input("Nađi izvođača", key="izv_trazi", placeholder="npr. Queen").strip().lower()
+        mesto = {a: i for i, a in enumerate(poredak, 1)}
+        prikaz_izv = [a for a in poredak if trazi in ime(a).lower()] if trazi else poredak
+        for a in prikaz_izv[:broj]:
+            prikaz.kartica_izvodjaca(mesto[a], ime(a), izvodjaci["pr"][a], izvodjaci["dolaznih"][a])
+        if trazi and not prikaz_izv:
+            st.info("Nema tog izvođača u grafu (možda za njega nije nađen članak).")
+        with st.expander("Izbor faktora prigušenja d i poređenje sa brojanjem linkova"):
+            top = poredak[:20]
+            redovi = []
+            for d, o in izvodjaci["osetljivost"].items():
+                redovi.append({"d": d, "iteracija": o["iteracija"],
+                               "zajedničkih u top 20 sa d = 0.85": len(set(o["poredak"][:20]) & set(top))})
+            redovi.append({"d": izvodjaci["d"], "iteracija": izvodjaci["iteracija"],
+                           "zajedničkih u top 20 sa d = 0.85": 20})
+            st.dataframe(pd.DataFrame(redovi).sort_values("d"), hide_index=True)
+            st.markdown(f"Samo broj dolaznih linkova: zajedničkih u top 20 sa PageRank-om "
+                        f"**{len(set(izvodjaci['po_dolaznim'][:20]) & set(top))}**.")
+            st.markdown("d = 0.85: surfer u 85% slučajeva prati link, u 15% skače na slučajnu stranicu. "
+                        "Manje d (0.5) gura poredak ka ravnomernom i skoro briše razliku među stranicama, "
+                        "veće d (0.95) daje veći uticaj zatvorenim grupama stranica i sporije konvergira "
+                        "(više iteracija).")
+
+    # --- slicni ---
+    with tab2:
+        sl = izvodjaci["slicnost"]
+        st.caption("Dva izvođača su slična ako na njih pokazuju iste stranice. Stranica koja pokazuje na "
+                   "mnogo izvođača (spisak nagrada) vredi manje: težina log(A / broj izvođača na koje "
+                   "pokazuje); sličnost je kosinus.")
+        po_imenu = sorted(sl.izvodjaci, key=lambda a: ime(a).lower())
+        a = st.selectbox("Izvođač koga volite", po_imenu, format_func=ime, key="izv_izabran",
+                         index=po_imenu.index(poredak[0]) if poredak else 0)
+        slicni = sl.slicni(a, 10)
+        if not slicni:
+            st.info("Na ovog izvođača ne pokazuje nijedna stranica koja pokazuje i na druge izvođače.")
+        for i, (b, kos, stranice, ukupno) in enumerate(slicni, 1):
+            prikaz.kartica_izvodjaca(i, ime(b), kos, izvodjaci["dolaznih"][b])
+            ostalo = f" (i još {ukupno - len(stranice)})" if ukupno > len(stranice) else ""
+            st.markdown(f"<div style='margin:-4px 0 8px 8px'>Oboje se pominju u: "
+                        f"{html.escape(', '.join(naslovi[p] for p in stranice))}{ostalo}</div>",
+                        unsafe_allow_html=True)
+        if slicni:
+            st.caption("Na kartici je kosinusna sličnost (umesto ranga).")
+            import matplotlib.pyplot as plt
+            import networkx as nx
+            G = nx.Graph()                                  # networkx samo za crtanje
+            for b, _, stranice, _ in slicni[:6]:
+                for p in stranice[:3]:
+                    G.add_edge(ime(a), naslovi[p])
+                    G.add_edge(ime(b), naslovi[p])
+            izv_imena = {ime(a)} | {ime(b) for b, _, _, _ in slicni[:6]}
+            fig, ax = plt.subplots(figsize=(9, 6))
+            poz = nx.spring_layout(G, seed=7, k=0.9)
+            nx.draw_networkx_nodes(G, poz, ax=ax, node_size=[900 if n == ime(a) else 500 if n in izv_imena
+                                                             else 200 for n in G],
+                                   node_color=["#e4572e" if n == ime(a) else "#4e79a7" if n in izv_imena
+                                               else "#bab0ac" for n in G])
+            nx.draw_networkx_edges(G, poz, ax=ax, alpha=0.4)
+            nx.draw_networkx_labels(G, poz, ax=ax, font_size=8)
+            ax.axis("off")
+            st.pyplot(fig)
+            st.caption("Crveno: izabrani izvođač, plavo: slični, sivo: stranice koje ih povezuju.")
 
 
 # --- Radio -------------------------------------------------------------

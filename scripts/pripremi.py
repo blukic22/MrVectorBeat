@@ -45,10 +45,12 @@ print("Evaluacija (rang-liste za qrels i mreza k1 x b):")
 pipeline.napravi_evaluaciju()
 
 # Jezicki model
+print("Jezicki model (Dirichlet) i mreza mu:")
 pipeline.napravi_jezicki()
 
 # PageRank nad grafom izvodjaca
 # Vas crawler pravi graf izvodjaca - pokrenite ga pre ovog koraka.
+print("PageRank i slicnost izvodjaca:")
 pipeline.napravi_rangove()
 
 # k-d stablo

@@ -29,7 +29,8 @@ from mrvectorbeat.kgram import KgramIndeks, K
 from mrvectorbeat.indeks import Indeks
 from mrvectorbeat.tfidf import TfidfModel
 from mrvectorbeat.bm25 import Bm25Model
-from mrvectorbeat import rang, evaluacija
+from mrvectorbeat import rang, evaluacija, jezicki, pagerank
+from mrvectorbeat.jezicki import JezickiModel
 import time
 
 CSV = Path("data/spotify_songs.csv")
@@ -43,12 +44,22 @@ INDEKS = ART / "indeks.pkl.gz"
 TFIDF = ART / "tfidf.pkl.gz"
 BM25 = ART / "bm25.pkl.gz"
 EVALUACIJA = ART / "evaluacija.pkl.gz"
+JEZICKI = ART / "jezicki.pkl.gz"
+# graf sa Vikipedije je u data/, a ne u artifacts/: projekat se salje bez
+# artefakata, a graf (za razliku od ostalih) ne moze da se napravi iz data/
+# bez crawlanja (4-5 h). pripremi iz njega pravi PageRank i slicnost.
+GRAF = Path("data/graf_vikipedija.pkl.gz")
+RANGOVI = ART / "rangovi.pkl.gz"
 QRELS = Path("data/qrels.csv")
 
 # Evaluacija: tri modela i mreza parametara BM25 za grafik MRR(k1) po b
 MERE_EVALUACIJE = ("tfidf", "kosinus", "bm25")
 MREZA_K1 = [i / 4 for i in range(0, 13)]        # 0, 0.25, ..., 3.0
 MREZA_B = [0.0, 0.25, 0.5, 0.75, 1.0]
+# Jezicki model: vrednosti mu za grafik MRR(mu)
+# PageRank: druge vrednosti faktora prigusenja, za poredjenje sa izabranim
+OSETLJIVOST_D = [0.5, 0.95]
+MREZA_MU = [5, 10, 25, 50, 100, 150, 250, 500, 1000, 2000, 5000]
 
 # Kolone koje zadrzavamo u katalogu. Sve ostalo iz CSV-a nam ne treba.
 # Kartice u prikaz.py ocekuju bar: track_name, track_artist, godina,
@@ -326,30 +337,106 @@ def ucitaj_evaluaciju():
         return pickle.load(f)
 
 
-def napravi_jezicki(mu=1000.0):
-    """Gradi jezicki model i snima ga u artifacts/."""
-    pass
+def napravi_jezicki():
+    """Gradi jezicki model (Dirichlet) iz pozicionog indeksa i racuna MRR za vise
+    vrednosti mu nad upitima za jednu pesmu iz qrels (bez i sa greskom), za
+    grafik na strani Jezicki model. Mreza se cuva u model.mreza, a uticaj
+    prosirenja za izabrano mu u model.prosirenje."""
+    t0 = time.perf_counter()
+    ind = ucitaj_indeks()
+    model = JezickiModel(ind)
+    t1 = time.perf_counter()
+
+    porodice = ucitaj_katalog()["porodica"].to_numpy()
+    q = ucitaj_qrels("poznata_stavka")
+    ocene = ocene_po_upitu(q)
+    grupe = {}
+    for u in q.drop_duplicates("upit")[["upit", "tipfeler"]].itertuples():
+        grupe.setdefault(evaluacija.grupa("poznata_stavka", u.tipfeler), []).append(u.upit)
+
+    def mrr(upiti, mu, prosirenje):
+        zbir = 0.0
+        for upit in upiti:
+            rez = jezicki.pretraga(ind, model, upit, porodice, prosirenje, mu)["rezultat"]
+            zbir += evaluacija.reciprocni_rang([porodice[d] for d, _ in rez], ocene[upit], 2)
+        return zbir / len(upiti)
+
+    model.mreza = [(mu, g, mrr(upiti, mu, False)) for mu in MREZA_MU for g, upiti in grupe.items()]
+    model.prosirenje = {g: (mrr(upiti, None, False), mrr(upiti, None, True)) for g, upiti in grupe.items()}
+    with gzip.open(JEZICKI, "wb") as f:
+        pickle.dump(model, f, protocol=pickle.HIGHEST_PROTOCOL)
+    print(f"  termina: {len(model.pc)}, |C| = {model.ukupno} termina, mu = {model.mu}, gradnja: {t1 - t0:.1f} s")
+    for g in grupe:
+        tacke = [(mu, m) for mu, gg, m in model.mreza if gg == g]
+        naj = max(tacke, key=lambda x: x[1])
+        bez, sa = model.prosirenje[g]
+        print(f"  {g}: MRR po mu " + ", ".join(f"{mu:g}: {m:.3f}" for mu, m in tacke))
+        print(f"    najbolje mu = {naj[0]:g} ({naj[1]:.4f}); za izabrano mu: bez prosirenja {bez:.4f}, sa prosirenjem {sa:.4f}")
+    print(f"  fajl: {JEZICKI.stat().st_size / 2**20:.1f} MB, ukupno: {time.perf_counter() - t0:.1f} s")
+    return model
 
 
 def ucitaj_jezicki():
-    """Cita gotov jezicki model iz artifacts/."""
-    pass
+    with gzip.open(JEZICKI, "rb") as f:
+        return pickle.load(f)
+
+
+def snimi_graf(graf):
+    """Snima graf koji je napravio crawler (scripts/crawl.py)."""
+    GRAF.parent.mkdir(exist_ok=True)
+    with gzip.open(GRAF, "wb") as f:
+        pickle.dump(graf, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 def ucitaj_graf():
-    """Cita graf izvodjaca koji je napravio vas crawler."""
-    pass
+    """Graf preuzetih stranica: naslovi, linkovi (id -> lista id-jeva), muzicka,
+    izvodjac (cvor -> imena iz kataloga), statistika."""
+    with gzip.open(GRAF, "rb") as f:
+        return pickle.load(f)
 
 
 def napravi_rangove():
-    """Racuna PageRank nad grafom izvodjaca i snima rang-listu u
-    artifacts/."""
-    pass
+    """PageRank nad CELIM grafom (sve preuzete stranice), broj dolaznih linkova
+    i slicnost izvodjaca; za prikaz se izdvajaju samo izvodjaci iz kataloga.
+    Racuna i PageRank za druge vrednosti d (osetljivost izbora)."""
+    if not GRAF.exists():
+        print(f"  nema {GRAF} - prvo pokrenite: python -u -m scripts.crawl")
+        return None
+    t0 = time.perf_counter()
+    graf = ucitaj_graf()
+    linkovi = graf["linkovi"]
+    pr, iteracija = pagerank.pagerank(linkovi, pagerank.D)
+    dolaznih = pagerank.dolaznih(linkovi)
+    izv = sorted(graf["izvodjac"], key=lambda a: (-pr[a], a))      # izvodjaci po uticaju
+
+    osetljivost = {}
+    for d in OSETLJIVOST_D:
+        r, it = pagerank.pagerank(linkovi, d)
+        osetljivost[d] = {"iteracija": it, "poredak": sorted(graf["izvodjac"], key=lambda a: (-r[a], a))}
+    po_dolaznim = sorted(graf["izvodjac"], key=lambda a: (-dolaznih[a], a))
+
+    rezultat = {"d": pagerank.D, "pr": pr, "iteracija": iteracija, "dolaznih": dolaznih,
+                "poredak": izv, "po_dolaznim": po_dolaznim, "osetljivost": osetljivost,
+                "slicnost": pagerank.Slicnost(graf), "statistika": graf["statistika"]}
+    with gzip.open(RANGOVI, "wb") as f:
+        pickle.dump(rezultat, f, protocol=pickle.HIGHEST_PROTOCOL)
+    s = graf["statistika"]
+    print(f"  graf: {s['stranica']} stranica ({100 * s['muzickih'] / max(1, s['stranica']):.1f}% muzickih), "
+          f"{s['grana']} grana, izvodjaca iz kataloga: {len(izv)}")
+    print(f"  PageRank d = {pagerank.D}: {iteracija} iteracija, zbir rangova {sum(pr):.6f}")
+    for d, o in osetljivost.items():
+        zajedno = len(set(o["poredak"][:20]) & set(izv[:20]))
+        print(f"  d = {d}: {o['iteracija']} iteracija, zajednickih u top 20 sa d = {pagerank.D}: {zajedno}")
+    print(f"  top 5: " + ", ".join(graf["izvodjac"][a][0] for a in izv[:5]))
+    print(f"  fajl: {RANGOVI.stat().st_size / 2**20:.1f} MB, {time.perf_counter() - t0:.1f} s")
+    return rezultat
 
 
 def ucitaj_rangove():
-    """Cita gotovu rang-listu iz artifacts/."""
-    pass
+    """Recnik: d, pr (rang svake stranice), dolaznih, poredak (izvodjaci po
+    uticaju), po_dolaznim, osetljivost, slicnost (pagerank.Slicnost), statistika."""
+    with gzip.open(RANGOVI, "rb") as f:
+        return pickle.load(f)
 
 
 def napravi_kdrvo():
