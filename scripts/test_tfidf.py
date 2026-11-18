@@ -1,7 +1,8 @@
-import math, random, time
+import inspect, math, random, re, time
 from collections import Counter
 
 from mrvectorbeat import pipeline, tekst
+from mrvectorbeat.tfidf import TfidfModel
 
 df = pipeline.ucitaj_katalog()
 tok = pipeline.ucitaj_tokene()
@@ -90,7 +91,7 @@ for d in random.sample(range(N), 12):
         continue
     sl = model.slicne(ind, d, 10, fam)
     ocek = sorted(((brute_ltc(d, p), p) for p in range(N) if p != d and fam[p] != fam[d] and
-                   any(t in TF[p] for t in TF[d] if IDF[t] > 0)), key=lambda x: (-x[0], x[1]))
+                   any(t in TF[p] for t in TF[d])), key=lambda x: (-x[0], x[1]))
     videne, top = set(), []
     for o, p in ocek:
         if fam[p] in videne:
@@ -130,6 +131,15 @@ for mera in ("tfidf", "kosinus"):
             == model.rangiraj(ind, "qqqzzz", mera)[0] == [])
 provera("nepostojeci termin ne smeta ostalima",
         model.ocene(ind, "love qqqzzz", "tfidf") == model.ocene(ind, "love", "tfidf"))
+
+# grep: u funkcijama upita idf i norme pesama se samo citaju. log10 sme samo kao
+# tf tezina (1 + log10 tf), a sqrt samo za normu upita (u ocene).
+izvori = {ime: inspect.getsource(getattr(TfidfModel, ime))
+          for ime in ("ocene", "rangiraj", "slicne", "doprinosi")}
+log_ok = all(re.sub(r"1\.0 \+ math\.log10\(", "", s).count("log") == 0 for s in izvori.values())
+sqrt_ok = all(s.count("sqrt") == (1 if ime == "ocene" else 0) for ime, s in izvori.items())
+provera("grep: u funkcijama upita nema racunanja idf (log samo za tf tezinu)", log_ok)
+provera("grep: u funkcijama upita nema racunanja norme pesme (sqrt samo za upit)", sqrt_ok)
 
 t0 = time.perf_counter()
 for u in upiti[:100]:

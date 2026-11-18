@@ -37,8 +37,11 @@ pipeline.napravi_indeks()
 print("TF-IDF model:")
 pipeline.napravi_tfidf()
 
-# BM25 i evaluacija
+# BM25 i evaluacija (evaluacija koristi indeks, TF-IDF i BM25, pa ide posle njih)
+print("BM25 model:")
 pipeline.napravi_bm25()
+
+print("Evaluacija (rang-liste za qrels i mreza k1 x b):")
 pipeline.napravi_evaluaciju()
 
 # Jezicki model

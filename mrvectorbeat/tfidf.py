@@ -3,8 +3,9 @@ from array import array
 from collections import Counter
 
 from mrvectorbeat import tekst
+from mrvectorbeat.rang import uredi
 
-MERE = ("tfidf", "kosinus")
+MERE = ("tfidf", "kosinus")          # BM25 je poseban model (bm25.py)
 
 
 class TfidfModel :
@@ -70,18 +71,7 @@ class TfidfModel :
         return ocene
 
     def rangiraj(self, ind, upit : str, mera : str, porodice = None) :
-        ocene = self.ocene(ind, upit, mera)
-        redosled = sorted(ocene.items(), key = lambda x : (-x[1], x[0]))
-        if porodice is None :
-            return redosled, len(ocene)
-        videne, rez = {}, []
-        for d, o in redosled :
-            f = porodice[d]
-            if f in videne :
-                continue
-            videne[f] = True
-            rez.append((d, o))
-        return rez, len(ocene)
+        return uredi(self.ocene(ind, upit, mera), porodice)
 
 
     def slicne(self, ind, d : int, k : int = 10, porodice = None) -> list :
@@ -91,9 +81,8 @@ class TfidfModel :
         ocene = {}
         for tid, tf in zip(self.p_termini[d], self.p_tf[d]) :
             t = self.termini[tid]
+            # termin sa idf = 0 daje tezinu 0, ali pesme sa njim ostaju kandidati
             w = (1.0 + math.log10(tf)) * self.idf[t] / norma
-            if w == 0 :
-                continue
             for p, x in zip(ind.postings(t), self.tezine[t][2]) :
                 ocene[p] = ocene.get(p, 0.0) + w * x
         ocene.pop(d, None)

@@ -16,7 +16,7 @@
 
 import streamlit as st
 import pandas as pd
-from mrvectorbeat import pipeline, prikaz, tekst, autodopuna, rangirano
+from mrvectorbeat import pipeline, prikaz, tekst, autodopuna, rangirano, evaluacija
 from st_keyup import st_keyup
 import math
 import time
@@ -73,7 +73,7 @@ def ucitaj_bm25():
     return pipeline.ucitaj_bm25()
 
 
-@st.cache_data
+@st.cache_resource   # cele rang-liste (8 MB), cita se samo na strani Evaluacija
 def ucitaj_evaluaciju():
     return pipeline.ucitaj_evaluaciju()
 
@@ -81,6 +81,22 @@ def ucitaj_evaluaciju():
 @st.cache_data
 def ucitaj_qrels():
     return pipeline.ucitaj_qrels()
+
+
+@st.cache_resource
+def mere_evaluacije():
+    """Mere za svaki upit i svaki model, nad rang-listama iz artefakta (ovde se
+    nista ne rangira). Vraca (tabela mera po upitu, recnik upit -> ocene porodica)."""
+    e = ucitaj_evaluaciju()
+    ocene = pipeline.ocene_po_upitu(ucitaj_qrels())
+    porodice = ucitaj_katalog()["porodica"].to_numpy()
+    redovi = []
+    for mera, po_upitu in e["liste"].items():
+        for u in e["upiti"]:
+            lista = [porodice[d] for d in po_upitu[u["upit"]]]
+            m = evaluacija.mere_upita(lista, ocene.get(u["upit"], {}), evaluacija.prag(u["skup"]))
+            redovi.append({"grupa": u["grupa"], "upit": u["upit"], "model": mera, **m})
+    return pd.DataFrame(redovi), ocene
 
 
 @st.cache_data
@@ -93,7 +109,7 @@ def ucitaj_kgram():
     return pipeline.ucitaj_kgram()
 
 
-@st.cache_data
+@st.cache_resource   # isti recnik za svaki render, bez kopiranja posle svakog slova
 def ucitaj_porodice():
     return pipeline.ucitaj_porodice()
 
@@ -172,7 +188,7 @@ def ucitaj_audio_vektore():
 def ucitaj_sbert_vektore():
     pass
 
-if not all(p.exists() for p in (pipeline.KATALOG, pipeline.TRIE, pipeline.KGRAM, pipeline.INDEKS, pipeline.TFIDF)):
+if not all(p.exists() for p in (pipeline.KATALOG, pipeline.TRIE, pipeline.KGRAM, pipeline.INDEKS, pipeline.TFIDF, pipeline.BM25)):
     st.error("Nema artefakata. Pokrenite u terminalu: python -m scripts.pripremi")
     st.stop()
 
@@ -305,7 +321,7 @@ elif strana == "Stihovi":
     rezim = st.radio("Režim", ["Bulov", "Frazni", "Blizina", "Rangirano"], horizontal=True)
     poruka, pogodci, pozitivni = None, [], ""
     if rezim == "Rangirano" :
-        rangirano.strana(ind, ucitaj_tfidf(), df)
+        rangirano.strana(ind, ucitaj_tfidf(), ucitaj_bm25(), df)
         st.stop()
     # pogodci: lista (id pesme, pogoci ili None); None znaci da se pozicije traze
     # tek za prikazane pesme (Bulov rezim)
@@ -406,9 +422,78 @@ elif strana == "Jezicki model":
 
 elif strana == "Evaluacija":
     st.title("Evaluacija pretrage")
+    st.caption("Rang-liste za sve upite iz data/qrels.csv pravi scripts.pripremi, istom funkcijom "
+               "kao strana Stihovi (jedna verzija po porodici, upiti sa greškom se ne ispravljaju). "
+               "Ova strana samo čita te liste i računa mere.")
+    if not pipeline.EVALUACIJA.exists():
+        st.error("Nema artefakta evaluacije. Pokrenite: python -m scripts.pripremi")
+        st.stop()
 
-    # Koristi: ucitaj_evaluaciju(), ucitaj_qrels(), ucitaj_tfidf(),
-    #          ucitaj_bm25(), ind, df, prikaz.kartica()
+    ev = ucitaj_evaluaciju()
+    tabela, ocene_upita = mere_evaluacije()
+    NAZIVI = {v: k for k, v in rangirano.MERE.items()}       # "bm25" -> "BM25"
+
+    # --- 1. Tabele: tri grupe, redovi su modeli, kolone cetiri mere ---
+    st.subheader("Proseci po grupama upita")
+    st.caption("Pogodak: za upit za jednu pesmu samo ocena 2 (sve verzije te pesme), za tematski "
+               "ocena 1 ili 2. Ocena važi za celu porodicu. MAP deli brojem svih relevantnih "
+               "pesama, nDCG@5 daje oceni 2 dvostruku težinu od ocene 1.")
+    for g in evaluacija.GRUPE:
+        deo = tabela[tabela["grupa"] == g]
+        proseci = (deo.groupby("model", sort=False)[list(evaluacija.MERE)].mean()
+                   .rename(index=NAZIVI))
+        st.markdown(f"**{g}** · {deo['upit'].nunique()} upita · glavna mera: "
+                    f"**{evaluacija.GLAVNA[g]}**")
+        st.dataframe(proseci.style.format("{:.3f}").highlight_max(
+            subset=[evaluacija.GLAVNA[g]], props="font-weight:bold"), width="stretch")
+
+    # --- 2. Pregled jednog upita ---
+    st.divider()
+    st.subheader("Pregled upita")
+    st.caption("Prvih 5 pesama svakog modela. :green[zeleno] ocena 2, :blue[plavo] ocena 1, "
+               ":gray[sivo] ocena 0 (pesma nije u fajlu za ovaj upit).")
+    izbor = st.selectbox("Upit iz fajla", list(range(len(ev["upiti"]))),
+                         format_func=lambda i: f"{ev['upiti'][i]['grupa']} · {ev['upiti'][i]['upit']}")
+    u = ev["upiti"][izbor]
+    ocene = ocene_upita.get(u["upit"], {})
+    porodice_kat = df["porodica"].to_numpy()
+    BOJE = {2: "green", 1: "blue", 0: "gray"}
+
+    def bez_markdowna(tekst_):
+        # znakovi koje markdown tumaci (npr. ] zatvara :green[...], $ pokrece LaTeX)
+        return "".join("\\" + z if z in "\\`*_[]{}$<>#~|" else z for z in str(tekst_))
+
+    kolone = st.columns(len(ev["liste"]))
+    for kol, (mera, po_upitu) in zip(kolone, ev["liste"].items()):
+        lista = po_upitu[u["upit"]]
+        kol.markdown(f"**{NAZIVI[mera]}** · {len(lista):,} pesama u listi")
+        if not len(lista):
+            kol.info("Nijedna pesma ne sadrži reči upita.")
+        for i, d in enumerate(lista[:5], 1):
+            o = ocene.get(porodice_kat[d], 0)
+            kol.markdown(f":{BOJE[o]}[{i}. {bez_markdowna(df['track_name'].iat[d])} — "
+                         f"{bez_markdowna(df['track_artist'].iat[d])}]")
+        m = tabela[(tabela["upit"] == u["upit"]) & (tabela["model"] == mera)].iloc[0]
+        kol.markdown(f"P@5 **{m['P@5']:.3f}** · RR **{m['MRR']:.3f}**  \n"
+                     f"AP **{m['MAP']:.3f}** · nDCG@5 **{m['nDCG@5']:.3f}**")
+
+    # --- 3. Parametri BM25 ---
+    st.divider()
+    st.subheader("Parametri BM25")
+    st.caption("MRR nad upitima za jednu pesmu bez greške, za svaku kombinaciju k1 i b "
+               "(računa scripts.pripremi). Jedna linija za svako b.")
+    mreza = pd.DataFrame(ev["mreza"], columns=["k1", "b", "MRR"])
+    mreza["b"] = "b = " + mreza["b"].map(lambda x: f"{x:.2f}")
+    st.line_chart(mreza.pivot(index="k1", columns="b", values="MRR"), x_label="k1", y_label="MRR")
+    najbolji = max(ev["mreza"], key=lambda x: x[2])
+    izabran = next((r for r in ev["mreza"] if r[0] == ev["k1"] and r[1] == ev["b"]), None)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Izabrano k1", ev["k1"])
+    c2.metric("Izabrano b", ev["b"])
+    if izabran:
+        c3.metric("MRR za izabrane", f"{izabran[2]:.3f}")
+    st.markdown(f"Najbolja tačka mreže: k1 = {najbolji[0]}, b = {najbolji[1]} "
+                f"(MRR {najbolji[2]:.3f}). Izabrane vrednosti koristi i strana Stihovi.")
 
 
 # --- Izvodjaci ---------------------------------------------------------

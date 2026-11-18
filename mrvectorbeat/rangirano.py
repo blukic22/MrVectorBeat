@@ -5,9 +5,9 @@ import time
 import pandas as pd
 import streamlit as st
 
-from mrvectorbeat import prikaz, tekst
+from mrvectorbeat import prikaz, rang, tekst
 
-MERE = {"TF-IDF": "tfidf", "Kosinus (lnc.ltc)": "kosinus"}
+MERE = {"TF-IDF": "tfidf", "Kosinus (lnc.ltc)": "kosinus", "BM25": "bm25"}
 PO_STRANI = 10
 SIRINA = 8                  
 PRAZAN = "Upit nema termina posle obrade: stop-reci se ne pretrazuju."
@@ -43,10 +43,11 @@ def _istakni_sve(stih, koreni) :
                     for i, r in enumerate(reci))
 
 
-def strana(ind, model, df) :
+def strana(ind, model, bm25, df) :
     st.caption("Pesme poređane po oceni sličnosti sa upitom. Ocenjuju se samo pesme koje "
                "sadrže bar jednu reč iz upita. TF-IDF je zbir težina (1 + log tf) · idf; "
-               "kosinus (lnc.ltc) normalizuje dužinu pesme i upita.")
+               "kosinus (lnc.ltc) normalizuje dužinu pesme i upita; BM25 ograničava uticaj tf "
+               f"(k1 = {bm25.k1}) i kažnjava duge pesme (b = {bm25.b}).")
     porodice = df["porodica"].to_numpy()
 
     c1, c2 = st.columns([3, 2])
@@ -62,7 +63,8 @@ def strana(ind, model, df) :
         return
 
     t0 = time.perf_counter()
-    rezultat, ocenjeno = model.rangiraj(ind, upit, mera, porodice)
+    # ista funkcija kao u evaluaciji (scripts.pripremi), pa se meri lista koju korisnik vidi
+    rezultat, ocenjeno = rang.rangiraj(ind, model, bm25, upit, mera, porodice)
     ms = (time.perf_counter() - t0) * 1000
     if not rezultat:
         st.info("Nema pesama koje odgovaraju upitu.")

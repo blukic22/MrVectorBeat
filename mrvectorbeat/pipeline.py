@@ -28,6 +28,8 @@ from mrvectorbeat.trie import Trie
 from mrvectorbeat.kgram import KgramIndeks, K
 from mrvectorbeat.indeks import Indeks
 from mrvectorbeat.tfidf import TfidfModel
+from mrvectorbeat.bm25 import Bm25Model
+from mrvectorbeat import rang, evaluacija
 import time
 
 CSV = Path("data/spotify_songs.csv")
@@ -39,6 +41,14 @@ TRIE = ART / "trie.pkl.gz"
 KGRAM = ART / "kgram.pkl.gz"
 INDEKS = ART / "indeks.pkl.gz"
 TFIDF = ART / "tfidf.pkl.gz"
+BM25 = ART / "bm25.pkl.gz"
+EVALUACIJA = ART / "evaluacija.pkl.gz"
+QRELS = Path("data/qrels.csv")
+
+# Evaluacija: tri modela i mreza parametara BM25 za grafik MRR(k1) po b
+MERE_EVALUACIJE = ("tfidf", "kosinus", "bm25")
+MREZA_K1 = [i / 4 for i in range(0, 13)]        # 0, 0.25, ..., 3.0
+MREZA_B = [0.0, 0.25, 0.5, 0.75, 1.0]
 
 # Kolone koje zadrzavamo u katalogu. Sve ostalo iz CSV-a nam ne treba.
 # Kartice u prikaz.py ocekuju bar: track_name, track_artist, godina,
@@ -220,32 +230,100 @@ def ucitaj_tfidf():
 
 
 def napravi_bm25():
-    """Gradi BM25 model i snima ga u artifacts/."""
-    pass
+    """Gradi BM25 model iz pozicionog indeksa: idf, duzina svake pesme i
+    prosecna duzina se racunaju jednom i snimaju u artifacts/."""
+    t0 = time.perf_counter()
+    ind = ucitaj_indeks()
+    model = Bm25Model(ind)
+    with gzip.open(BM25, "wb") as f:
+        pickle.dump(model, f, protocol=pickle.HIGHEST_PROTOCOL)
+    print(f"  termina: {len(model.idf)}, k1 = {model.k1}, b = {model.b}, "
+          f"prosecna duzina pesme: {model.avgdl:.1f} termina, "
+          f"fajl: {BM25.stat().st_size / 2**20:.1f} MB, gradnja: {time.perf_counter() - t0:.1f} s")
+    return model
 
 
 def ucitaj_bm25():
-    """Cita gotov BM25 model iz artifacts/."""
-    pass
+    with gzip.open(BM25, "rb") as f:
+        return pickle.load(f)
 
 
 def ucitaj_qrels(skup=None):
-    """Cita test upite iz data/qrels.csv.
+    """Cita test upite iz data/qrels.csv i dodaje kolonu porodica (iz kataloga).
 
     skup - "poznata_stavka", "tema", ili None za oba.
-    Vraca: tabelu (skup, upit, track_id, ocena, tipfeler)."""
-    pass
+    Vraca: tabelu (skup, upit, track_id, ocena, tipfeler, porodica)."""
+    q = pd.read_csv(QRELS)
+    kat = pd.read_parquet(KATALOG, columns=["track_id", "porodica"])
+    q = q.merge(kat, on="track_id", how="left")
+    if skup is not None:
+        q = q[q["skup"] == skup].reset_index(drop=True)
+    return q
+
+
+def ocene_po_upitu(q):
+    """Recnik upit -> {porodica: ocena}. Ocena iz fajla vazi za celu porodicu;
+    ako bi porodica imala vise ocena, uzima se najveca."""
+    rez = {}
+    for upit, f, o in zip(q["upit"], q["porodica"], q["ocena"]):
+        if pd.isna(f):
+            continue
+        ocene = rez.setdefault(upit, {})
+        ocene[f] = max(ocene.get(f, 0), int(o))
+    return rez
 
 
 def napravi_evaluaciju():
-    """Racuna metrike za TF-IDF i BM25 nad qrels i snima tabelu u
-    artifacts/."""
-    pass
+    """Pusta sve upite iz qrels kroz sva tri modela, istom funkcijom kao strana
+    Stihovi (rang.rangiraj, jedna verzija po porodici), i cuva CELE rang-liste.
+    Upiti sa greskom se ne ispravljaju. Racuna i MRR za mrezu k1 x b nad upitima
+    za jednu pesmu bez greske (grafik na strani Evaluacija)."""
+    t0 = time.perf_counter()
+    df = ucitaj_katalog()
+    porodice = df["porodica"].to_numpy()
+    ind, tfidf, bm25 = ucitaj_indeks(), ucitaj_tfidf(), ucitaj_bm25()
+    q = ucitaj_qrels()
+    upiti = q.drop_duplicates("upit")[["skup", "upit", "tipfeler"]].to_dict("records")
+    for u in upiti:
+        u["grupa"] = evaluacija.grupa(u["skup"], u["tipfeler"])
+
+    liste = {}
+    for mera in MERE_EVALUACIJE:
+        liste[mera] = {}
+        for u in upiti:
+            rez, _ = rang.rangiraj(ind, tfidf, bm25, u["upit"], mera, porodice)
+            liste[mera][u["upit"]] = array("I", (d for d, _ in rez))
+    t1 = time.perf_counter()
+
+    ocene = ocene_po_upitu(q)
+    bez_greske = [u["upit"] for u in upiti if u["grupa"] == evaluacija.GRUPE[0]]
+    mreza = []
+    for b in MREZA_B:
+        for k1 in MREZA_K1:
+            zbir = 0.0
+            for upit in bez_greske:
+                rez, _ = rang.uredi(bm25.ocene(ind, upit, "bm25", k1, b), porodice)
+                zbir += evaluacija.reciprocni_rang([porodice[d] for d, _ in rez], ocene.get(upit, {}), 2)
+            mreza.append((k1, b, zbir / len(bez_greske)))
+    najbolji = max(mreza, key=lambda x: x[2])
+
+    rezultat = {"upiti": upiti, "liste": liste, "mreza": mreza, "k1": bm25.k1, "b": bm25.b}
+    with gzip.open(EVALUACIJA, "wb") as f:
+        pickle.dump(rezultat, f, protocol=pickle.HIGHEST_PROTOCOL)
+    print(f"  upita: {len(upiti)} ({', '.join(f'{g}: {sum(u['grupa'] == g for u in upiti)}' for g in evaluacija.GRUPE)}), "
+          f"modela: {len(MERE_EVALUACIJE)}, rang-liste: {t1 - t0:.1f} s")
+    print(f"  mreza k1 x b: {len(MREZA_K1)} x {len(MREZA_B)} = {len(mreza)} tacaka, {time.perf_counter() - t1:.1f} s")
+    print(f"  najbolji MRR na mrezi: {najbolji[2]:.4f} za k1 = {najbolji[0]}, b = {najbolji[1]}; "
+          f"izabrano u bm25.py: k1 = {bm25.k1}, b = {bm25.b}")
+    print(f"  fajl: {EVALUACIJA.stat().st_size / 2**20:.1f} MB")
+    return rezultat
 
 
 def ucitaj_evaluaciju():
-    """Cita gotovu tabelu metrika iz artifacts/."""
-    pass
+    """Recnik: upiti (skup, upit, tipfeler, grupa), liste (mera -> upit ->
+    array id-jeva pesama), mreza (k1, b, MRR), izabrani k1 i b."""
+    with gzip.open(EVALUACIJA, "rb") as f:
+        return pickle.load(f)
 
 
 def napravi_jezicki(mu=1000.0):
