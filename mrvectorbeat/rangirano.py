@@ -13,6 +13,23 @@ SIRINA = 8
 PRAZAN = "Upit nema termina posle obrade: stop-reci se ne pretrazuju."
 
 
+def _sidro(ime : str) :
+    """Nevidljiva oznaka na strani do koje se moze skrolovati. Ako je posle
+    klika zapamceno da treba skrolovati bas do nje, skroluje se (samo jednom)."""
+    st.markdown(f"<div id='sidro-{ime}'></div>", unsafe_allow_html=True)
+    if st.session_state.get("rang_skrol") != ime :
+        return
+    st.session_state.pop("rang_skrol")
+    # Streamlit sam ne skroluje; mali JavaScript u iframe-u trazi sidro u strani
+    # (window.parent) i pokusava par puta, dok se ostatak strane ne iscrta.
+    # HTML je nas i fiksan (ime je "slicne" ili "poredjenje"), nikad od korisnika.
+    st.iframe(
+        "<script>let n = 0; const t = setInterval(() => {"
+        f" const el = window.parent.document.getElementById('sidro-{ime}');"
+        " if (el) { el.scrollIntoView({behavior: 'smooth', block: 'start'}); clearInterval(t); }"
+        " if (++n > 20) clearInterval(t); }, 100);</script>", height=1)
+
+
 def _red(df, d) :
     red = df.iloc[d].to_dict()
     red["godina"] = "—" if pd.isna(red["godina"]) else int(red["godina"])
@@ -95,10 +112,12 @@ def strana(ind, model, bm25, df) :
         if st.button("Slične pesme", key=f"sl_{d}"):
             st.session_state["rang_slicna"] = d
             st.session_state.pop("rang_uporedi", None)
+            st.session_state["rang_skrol"] = "slicne"     # posle klika skroluj do liste slicnih
 
     d0 = st.session_state.get("rang_slicna")
     if d0 is None:
         return
+    _sidro("slicne")
     st.divider()
     r0 = _red(df, d0)
     st.subheader(f"Slične pesme: {r0['track_name']} — {r0['track_artist']}")
@@ -112,12 +131,14 @@ def strana(ind, model, bm25, df) :
         prikaz.kartica(i + 1, _red(df, p), kosinus)
         if st.button("Uporedi", key=f"up_{d0}_{p}"):
             st.session_state["rang_uporedi"] = (d0, p)
+            st.session_state["rang_skrol"] = "poredjenje"  # posle klika skroluj do poredjenja
 
     par = st.session_state.get("rang_uporedi")
     if not par or par[0] != d0:
         return
     a, b = par
     ukupno, tabela = model.doprinosi(a, b, 10)
+    _sidro("poredjenje")
     st.divider()
     st.subheader("Poređenje tekstova")
     st.markdown(f"**Kosinusna sličnost: {ukupno:.3f}** · istaknute su reči iz tabele (deset reči koje "
